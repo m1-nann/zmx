@@ -39,6 +39,8 @@ pub fn build(b: *std.Build) void {
     const dep = b.dependency("ghostty", .{
         .target = target,
         .optimize = optimize,
+        .@"emit-lib-vt" = true,
+        .@"emit-xcframework" = false,
     });
     exe_mod.addImport(
         "ghostty-vt",
@@ -71,6 +73,8 @@ pub fn build(b: *std.Build) void {
         const test_dep = b.dependency("ghostty", .{
             .target = target,
             .optimize = optimize,
+            .@"emit-lib-vt" = true,
+            .@"emit-xcframework" = false,
         });
         test_module.addImport(
             "ghostty-vt",
@@ -125,6 +129,8 @@ pub fn build(b: *std.Build) void {
             if (b.lazyDependency("ghostty", .{
                 .target = resolved,
                 .optimize = .ReleaseSafe,
+                .@"emit-lib-vt" = true,
+                .@"emit-xcframework" = false,
             })) |release_dep| {
                 release_mod.addImport("ghostty-vt", release_dep.module("ghostty-vt"));
             }

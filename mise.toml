@@ -1,3 +1,7 @@
 [tools]
 zig = "0.15.2"
 bats = "1.13.0"
+
+[env]
+SDKROOT = "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk"
+DEVELOPER_DIR = "/Library/Developer/CommandLineTools"
