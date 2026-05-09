@@ -97,7 +97,7 @@ pub fn main() !void {
 
     if (std.mem.eql(u8, cmd, "version") or std.mem.eql(u8, cmd, "v") or std.mem.eql(u8, cmd, "-v") or std.mem.eql(u8, cmd, "--version")) {
         return printVersion(&cfg);
-    } else if (std.mem.eql(u8, cmd, "help") or std.mem.eql(u8, cmd, "h") or std.mem.eql(u8, cmd, "-h")) {
+    } else if (std.mem.eql(u8, cmd, "help") or std.mem.eql(u8, cmd, "h") or std.mem.eql(u8, cmd, "-h") or std.mem.eql(u8, cmd, "--help")) {
         return help();
     } else if (std.mem.eql(u8, cmd, "list") or std.mem.eql(u8, cmd, "l") or std.mem.eql(u8, cmd, "ls")) {
         const short = if (args.next()) |arg| std.mem.eql(u8, arg, "--short") else false;
@@ -291,6 +291,11 @@ pub fn main() !void {
                 break;
             }
         }
+    } else if (std.mem.eql(u8, cmd, "restart") or std.mem.eql(u8, cmd, "re")) {
+        const session_name = args.next() orelse return error.SessionNameRequired;
+        const sesh = try socket.getSeshName(alloc, session_name);
+        defer alloc.free(sesh);
+        return restart(&cfg, alloc, sesh);
     } else if (std.mem.eql(u8, cmd, "wait") or std.mem.eql(u8, cmd, "w")) {
         var matchers: std.ArrayList(SessionMatch) = .empty;
         defer {
@@ -694,6 +699,19 @@ const Daemon = struct {
         };
         posix.sigaction(posix.SIG.PIPE, &dfl, null);
 
+        // Explicitly land the spawned shell in self.cwd. This is what the
+        // caller asked for via the Daemon struct; relying on the inherited
+        // cwd alone is fragile (a stray chdir anywhere in the daemon path
+        // would silently relocate the new shell).
+        if (self.cwd.len > 0) {
+            posix.chdir(self.cwd) catch |err| {
+                std.log.warn(
+                    "execChild: chdir to {s} failed: {s}",
+                    .{ self.cwd, @errorName(err) },
+                );
+            };
+        }
+
         const session_env = try std.fmt.allocPrintSentinel(
             alloc,
             "ZMX_SESSION={s}",
@@ -701,6 +719,19 @@ const Daemon = struct {
             0,
         );
         _ = cross.c.putenv(session_env.ptr);
+
+        // Set $PWD so the spawned login shell records the same cwd we just
+        // chdir'd to. zsh and bash trust $PWD over getcwd() when both agree;
+        // this also makes login rc files that read $PWD see the right value.
+        if (self.cwd.len > 0) {
+            const pwd_env = try std.fmt.allocPrintSentinel(
+                alloc,
+                "PWD={s}",
+                .{self.cwd},
+                0,
+            );
+            _ = cross.c.putenv(pwd_env.ptr);
+        }
 
         if (self.command) |cmd_args| {
             const argv = try alloc.allocSentinel(?[*:0]const u8, cmd_args.len, null);
@@ -1132,8 +1163,14 @@ const Daemon = struct {
             }
         }
 
-        info.cwd_len = @intCast(@min(self.cwd.len, ipc.MAX_CWD_LEN));
-        @memcpy(info.cwd[0..info.cwd_len], self.cwd[0..info.cwd_len]);
+        // Prefer the shell's *current* cwd over the static start_dir so
+        // `zmx list` reflects where the user actually is. Falls back to
+        // the original start_dir if the OS lookup fails (e.g. exited shell).
+        var cwd_buf: [4096]u8 = undefined;
+        const live_cwd = cross.getProcessCwd(self.pid, &cwd_buf);
+        const cwd_src: []const u8 = if (live_cwd) |c| c else self.cwd;
+        info.cwd_len = @intCast(@min(cwd_src.len, ipc.MAX_CWD_LEN));
+        @memcpy(info.cwd[0..info.cwd_len], cwd_src[0..info.cwd_len]);
 
         try ipc.appendMessage(self.alloc, &client.write_buf, .Info, std.mem.asBytes(&info));
         client.has_pending_output = true;
@@ -1302,6 +1339,7 @@ fn help() !void {
         \\  [d]etach                                 Detach all clients (ctrl+\\ or ctrl+q for current client)
         \\  [l]ist|ls [--short]                      List active sessions
         \\  [k]ill <name>... [--force]               Kill session and all attached clients
+        \\  [re]start <name>                         Kill <name> and respawn it in the same cwd
         \\  [hi]story <name> [--vt|--html]           Output session scrollback
         \\  [w]ait <name>...                         Wait for session tasks to complete
         \\  [t]ail <name>...                         Follow session output
@@ -1793,6 +1831,85 @@ fn kill(cfg: *Cfg, session_name: []const u8, force: bool) !void {
     var w = std.fs.File.stdout().writer(&buf);
     try w.interface.print("killed session {s}\n", .{session_name});
     try w.interface.flush();
+}
+
+/// Kills the session and immediately spawns a fresh daemon with the same
+/// name, in the cwd the original session was started from. The new daemon
+/// runs an interactive $SHELL; reattach with `zmx attach <name>`.
+fn restart(cfg: *Cfg, alloc: std.mem.Allocator, session_name: []const u8) !void {
+    // Look up the original session's cwd via the daemon's Info response
+    // before we kill it.
+    var sessions = try util.get_session_entries(alloc, cfg.socket_dir);
+    defer {
+        for (sessions.items) |s| s.deinit(alloc);
+        sessions.deinit(alloc);
+    }
+
+    var saved_cwd: ?[]u8 = null;
+    defer if (saved_cwd) |c| alloc.free(c);
+    for (sessions.items) |s| {
+        if (s.is_error) continue;
+        if (!std.mem.eql(u8, s.name, session_name)) continue;
+        if (s.cwd) |cwd| saved_cwd = try alloc.dupe(u8, cwd);
+        break;
+    }
+    if (saved_cwd == null) {
+        var buf: [256]u8 = undefined;
+        var w = std.fs.File.stderr().writer(&buf);
+        try w.interface.print("no session found: {s}\n", .{session_name});
+        try w.interface.flush();
+        std.process.exit(1);
+    }
+
+    try kill(cfg, session_name, false);
+
+    // Poll until the kill takes effect (socket file gone). The kill IPC is
+    // asynchronous: kill() returns once the message is sent, but the daemon
+    // takes a few ms to tear down its PTY and unlink the socket.
+    {
+        var dir = try std.fs.openDirAbsolute(cfg.socket_dir, .{});
+        defer dir.close();
+        var attempts: u8 = 0;
+        while (attempts < 40) : (attempts += 1) {
+            const still_there = socket.sessionExists(dir, session_name) catch false;
+            if (!still_there) break;
+            std.Thread.sleep(50 * std.time.ns_per_ms);
+        }
+    }
+
+    posix.chdir(saved_cwd.?) catch |err| {
+        var buf: [512]u8 = undefined;
+        var w = std.fs.File.stderr().writer(&buf);
+        try w.interface.print(
+            "failed to chdir to {s}: {s}\n",
+            .{ saved_cwd.?, @errorName(err) },
+        );
+        try w.interface.flush();
+        return err;
+    };
+
+    const clients = try std.ArrayList(*Client).initCapacity(alloc, 10);
+    var daemon = Daemon{
+        .running = true,
+        .cfg = cfg,
+        .alloc = alloc,
+        .clients = clients,
+        .session_name = session_name,
+        .socket_path = undefined,
+        .pid = undefined,
+        .command = null,
+        .cwd = saved_cwd.?,
+        .created_at = @intCast(std.time.timestamp()),
+        .leader_client_fd = null,
+    };
+    daemon.socket_path = socket.getSocketPath(alloc, cfg.socket_dir, session_name) catch |err| switch (err) {
+        error.NameTooLong => return socket.printSessionNameTooLong(session_name, cfg.socket_dir),
+        error.OutOfMemory => return err,
+    };
+
+    // Mirror `zmx attach`: spawn the daemon and stay attached as the client
+    // until the user detaches.
+    return attach(&daemon, null);
 }
 
 fn history(cfg: *Cfg, session_name: []const u8, format: util.HistoryFormat) !void {

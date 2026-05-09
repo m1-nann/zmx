@@ -9,21 +9,19 @@ pub const c = switch (builtin.os.tag) {
         @cInclude("termios.h");
         @cInclude("stdlib.h");
         @cInclude("unistd.h");
-        @cInclude("time.h"); // localtime_r, strftime
+        @cInclude("libproc.h"); // proc_pidinfo for live shell cwd lookup
     }),
     .freebsd => @cImport({
         @cInclude("termios.h"); // ioctl and constants
         @cInclude("libutil.h"); // openpty()
         @cInclude("stdlib.h");
         @cInclude("unistd.h");
-        @cInclude("time.h");
     }),
     else => @cImport({
         @cInclude("sys/ioctl.h"); // ioctl and constants
         @cInclude("pty.h");
         @cInclude("stdlib.h");
         @cInclude("unistd.h");
-        @cInclude("time.h");
     }),
 };
 
@@ -34,6 +32,38 @@ pub const forkpty = if (builtin.os.tag == .macos)
     }.forkpty
 else
     c.forkpty;
+
+/// Returns the current working directory of `pid` as a slice of `buf`, or
+/// null if the OS lookup fails (e.g. the process exited, or the platform
+/// has no supported method). Caller-provided buffer should be at least
+/// PATH_MAX (4096) bytes.
+pub fn getProcessCwd(pid: i32, buf: []u8) ?[]const u8 {
+    switch (builtin.os.tag) {
+        .macos => {
+            var info: c.struct_proc_vnodepathinfo = undefined;
+            const ret = c.proc_pidinfo(
+                pid,
+                c.PROC_PIDVNODEPATHINFO,
+                0,
+                &info,
+                @sizeOf(c.struct_proc_vnodepathinfo),
+            );
+            if (ret <= 0) return null;
+            const path: [*:0]const u8 = @ptrCast(&info.pvi_cdir.vip_path);
+            const slice = std.mem.sliceTo(path, 0);
+            const copy_len = @min(slice.len, buf.len);
+            @memcpy(buf[0..copy_len], slice[0..copy_len]);
+            return buf[0..copy_len];
+        },
+        .linux, .freebsd => {
+            var path_buf: [64]u8 = undefined;
+            const link_path = std.fmt.bufPrint(&path_buf, "/proc/{d}/cwd", .{pid}) catch return null;
+            const n = std.posix.readlink(link_path, buf) catch return null;
+            return buf[0..n];
+        },
+        else => return null,
+    }
+}
 
 /// Returns the basename of the foreground process running on the given PTY fd.
 /// Writes into `buf` and returns a slice of it, or null on failure.

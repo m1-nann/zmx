@@ -131,6 +131,7 @@ const fish_completions =
     \\complete -c zmx -n "__fish_is_nth_token 1" -a detach -d 'Detach all clients (ctrl+\ or ctrl+q for current client)'
     \\complete -c zmx -n "__fish_is_nth_token 1" -a list -d 'List active sessions'
     \\complete -c zmx -n "__fish_is_nth_token 1" -a kill -d 'Kill session and all attached clients'
+    \\complete -c zmx -n "__fish_is_nth_token 1" -a restart -d 'Kill the session and respawn it in the same cwd'
     \\complete -c zmx -n "__fish_is_nth_token 1" -a history -d 'Output session scrollback'
     \\complete -c zmx -n "__fish_is_nth_token 1" -a wait -d 'Wait for session tasks to complete'
     \\complete -c zmx -n "__fish_is_nth_token 1" -a tail -d 'Follow session output'

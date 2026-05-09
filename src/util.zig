@@ -3,10 +3,7 @@ const posix = std.posix;
 const ghostty_vt = @import("ghostty-vt");
 const ipc = @import("ipc.zig");
 const socket = @import("socket.zig");
-const cross = @import("cross.zig");
 const testing = std.testing;
-
-pub const TIMESTAMP_BUF_LEN = 32;
 
 /// Upper bound on rows of scrollback replayed to a (re-)attaching client.
 /// Older lines remain on the daemon and are accessible via `zmx history`.
@@ -673,8 +670,7 @@ const NAME_HIGHLIGHT_OFF = "\x1b[0m";
 const HEADER_NAME = "NAME";
 const HEADER_PID = "PID";
 const HEADER_CLIENTS = "CLIENTS";
-const HEADER_CREATED = "CREATED";
-const HEADER_START_DIR = "START_DIR";
+const HEADER_CWD = "CWD";
 
 /// Per-column display widths used to right-pad values so the table aligns
 /// across rows. Default zero values produce an unpadded single-row layout.
@@ -682,20 +678,7 @@ pub const ColumnWidths = struct {
     name: usize = 0,
     pid: usize = 0,
     clients: usize = 0,
-    created: usize = 0,
 };
-
-/// Formats `ts` (Unix epoch seconds) into `buf` as `YYYYMMDD HH:MM:SS` in the
-/// caller's local time. Falls back to the raw integer on failure.
-pub fn formatTimestamp(buf: []u8, ts: u64) []const u8 {
-    var t: cross.c.time_t = @intCast(ts);
-    var tm: cross.c.struct_tm = undefined;
-    if (cross.c.localtime_r(&t, &tm) == null) {
-        return std.fmt.bufPrint(buf, "{d}", .{ts}) catch buf[0..0];
-    }
-    const n = cross.c.strftime(buf.ptr, buf.len, "%Y%m%d %H:%M:%S", &tm);
-    return buf[0..n];
-}
 
 /// Computes the maximum display width for each column across a slice of
 /// session entries, factoring in the header label widths so the header row
@@ -705,9 +688,8 @@ pub fn columnWidths(sessions: []const SessionEntry) ColumnWidths {
         .name = HEADER_NAME.len,
         .pid = HEADER_PID.len,
         .clients = HEADER_CLIENTS.len,
-        .created = HEADER_CREATED.len,
     };
-    var buf: [TIMESTAMP_BUF_LEN]u8 = undefined;
+    var buf: [32]u8 = undefined;
     for (sessions) |s| {
         if (s.is_error) continue;
         if (s.name.len > w.name) w.name = s.name.len;
@@ -721,8 +703,6 @@ pub fn columnWidths(sessions: []const SessionEntry) ColumnWidths {
                 if (str.len > w.clients) w.clients = str.len;
             } else |_| {}
         }
-        const ts_str = formatTimestamp(&buf, s.created_at);
-        if (ts_str.len > w.created) w.created = ts_str.len;
     }
     return w;
 }
@@ -762,10 +742,7 @@ pub fn writeSessionHeader(writer: *std.Io.Writer, widths: ColumnWidths) !void {
     try writer.writeAll(HEADER_CLIENTS);
     try writeSpaces(writer, widths.clients -| HEADER_CLIENTS.len);
     try writer.writeByte(' ');
-    try writer.writeAll(HEADER_CREATED);
-    try writeSpaces(writer, widths.created -| HEADER_CREATED.len);
-    try writer.writeByte(' ');
-    try writer.writeAll(HEADER_START_DIR);
+    try writer.writeAll(HEADER_CWD);
     try writer.writeByte('\n');
 }
 
@@ -814,7 +791,7 @@ pub fn writeSessionLine(
         return;
     }
 
-    var num_buf: [TIMESTAMP_BUF_LEN]u8 = undefined;
+    var num_buf: [32]u8 = undefined;
 
     try writer.writeAll(prefix);
     if (color) try writer.writeAll(NAME_HIGHLIGHT_ON);
@@ -827,17 +804,11 @@ pub fn writeSessionLine(
     try writer.writeAll(pid_str);
     try writeSpaces(writer, widths.pid -| pid_str.len);
 
-    var clients_buf: [TIMESTAMP_BUF_LEN]u8 = undefined;
+    var clients_buf: [32]u8 = undefined;
     const clients_str = try std.fmt.bufPrint(&clients_buf, "{d}", .{session.clients_len.?});
     try writer.writeByte(' ');
     try writer.writeAll(clients_str);
     try writeSpaces(writer, widths.clients -| clients_str.len);
-
-    var created_buf: [TIMESTAMP_BUF_LEN]u8 = undefined;
-    const created_str = formatTimestamp(&created_buf, session.created_at);
-    try writer.writeByte(' ');
-    try writer.writeAll(created_str);
-    try writeSpaces(writer, widths.created -| created_str.len);
 
     if (session.cwd) |cwd| {
         try writer.writeByte(' ');
@@ -872,12 +843,6 @@ test "writeSessionLine formats output for current session and short output" {
         .task_exit_code = null,
     };
 
-    // The created column is rendered via libc localtime_r, so the expected
-    // string varies by the test host's TZ. Compute it the same way to keep
-    // the assertion deterministic regardless of timezone.
-    var ts_buf: [TIMESTAMP_BUF_LEN]u8 = undefined;
-    const ts_str = formatTimestamp(&ts_buf, session.created_at);
-
     const FullCase = struct {
         current_session: ?[]const u8,
         prefix: []const u8,
@@ -895,8 +860,8 @@ test "writeSessionLine formats output for current session and short output" {
 
         const expected = try std.fmt.allocPrint(
             testing.allocator,
-            "{s}dev 123 2 {s}\n",
-            .{ case.prefix, ts_str },
+            "{s}dev 123 2\n",
+            .{case.prefix},
         );
         defer testing.allocator.free(expected);
         try testing.expectEqualStrings(expected, builder.writer.buffered());

@@ -180,6 +180,85 @@ load test_helper
 }
 
 # ============================================================================
+# Session restart
+# ============================================================================
+
+# Helper: shared body for the restart-cwd assertion. Args:
+#   $1 — session name (must be unique across tests)
+#   $2 — SHELL value to spawn the new shell with
+#   $3 — HOME value (use an empty dir to isolate from user rc files)
+_restart_cwd_check() {
+  local name="$1" shell_path="$2" home_path="$3"
+
+  # Resolve symlinks so the path matches what `pwd` will print on macOS
+  # (where /var is a symlink to /private/var, etc.).
+  local orig_dir
+  orig_dir=$(cd "$BATS_TEST_TMPDIR" && mkdir -p "${name}-orig" && cd "${name}-orig" && pwd -P)
+
+  # Create a session FROM orig_dir so the daemon's stored start_dir is orig_dir.
+  # The session runs `sleep` to keep it alive long enough to restart.
+  (cd "$orig_dir" && "$ZMX" run "$name" -d sleep 60)
+  wait_for_session "$name"
+
+  # Move the test's own cwd elsewhere so we'd notice if `restart` reused
+  # the caller's cwd instead of the session's stored start_dir.
+  cd "$BATS_TEST_TMPDIR"
+
+  # restart now auto-attaches the way `zmx attach` does, so it would block
+  # in the client loop. Redirecting stdin from /dev/null gives EOF on the
+  # first read, which causes clientLoop to return as a detach. The daemon
+  # stays running; the client just detached early — exactly what we need
+  # to inspect the new shell from this test.
+  #
+  # `env -u ZMX_SESSION` strips the parent shell's session marker (the test
+  # may be run from inside a zmx session, e.g. Claude Code). Otherwise
+  # `attach` would route through switchSesh and target the *outer* session
+  # name instead of doing a fresh attach.
+  env -u ZMX_SESSION SHELL="$shell_path" HOME="$home_path" "$ZMX" restart "$name" </dev/null >/dev/null 2>&1
+
+  wait_for_session "$name"
+  # Allow the new shell to finish startup (rc files, prompt) before sending input.
+  sleep 0.5
+
+  # Ask the new shell where it is. The redirect goes through the shell, so
+  # the marker file is written from whatever cwd the shell inherited.
+  local marker="$orig_dir/marker"
+  printf 'pwd > %s\r' "$marker" | "$ZMX" send "$name"
+
+  # Wait for the marker to appear.
+  local i=0
+  while (( i < 50 )) && [[ ! -s "$marker" ]]; do
+    sleep 0.1
+    (( i++ )) || true
+  done
+
+  [ -s "$marker" ]
+  local actual
+  actual=$(cat "$marker")
+  [ "$actual" = "$orig_dir" ]
+}
+
+@test "restart: respawns shell in the original session cwd (sh)" {
+  # /bin/sh keeps rc-file behavior minimal — exercises the daemon-side chdir
+  # without shell startup interfering.
+  _restart_cwd_check tr-sh /bin/sh "$BATS_TEST_TMPDIR"
+}
+
+@test "restart: respawns shell in the original session cwd (\$SHELL, isolated HOME)" {
+  # Use whatever the runner's $SHELL is (typically zsh on macOS dev boxes)
+  # but with an empty HOME so per-user rc files (oh-my-zsh, autoenv, direnv,
+  # etc.) cannot mask the daemon's chdir. If this passes but the user sees
+  # the wrong cwd in real life, the cause is in their rc files / HOME.
+  local shell_path="${SHELL:-/bin/sh}"
+  if [[ ! -x "$shell_path" ]]; then
+    skip "\$SHELL ($shell_path) is not executable"
+  fi
+  local fake_home="$BATS_TEST_TMPDIR/empty-home"
+  mkdir -p "$fake_home"
+  _restart_cwd_check tr-usershell "$shell_path" "$fake_home"
+}
+
+# ============================================================================
 # Session isolation (ZMX_DIR)
 # ============================================================================
 
