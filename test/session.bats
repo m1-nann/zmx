@@ -113,7 +113,7 @@ load test_helper
   run "$ZMX" list
   [ "$status" -eq 0 ]
   [[ "$output" == *"test-list"* ]]
-  [[ "$output" == *"pid="* ]]
+  [[ "$output" == *"PID"* ]]
 }
 
 @test "list --short: shows only session names" {
@@ -168,7 +168,7 @@ load test_helper
 
   # Get the daemon PID and kill it directly (simulating a crash)
   local pid
-  pid=$("$ZMX" list 2>/dev/null | grep test-force | sed 's/.*pid=\([0-9]*\).*/\1/')
+  pid=$("$ZMX" list 2>/dev/null | grep test-force | awk '{print $2}')
   if [[ -n "$pid" ]]; then
     kill -9 "$pid" 2>/dev/null || true
     sleep 0.5

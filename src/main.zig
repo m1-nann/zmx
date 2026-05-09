@@ -1632,8 +1632,13 @@ fn list(cfg: *Cfg, short: bool) !void {
 
     std.mem.sort(util.SessionEntry, sessions.items, {}, util.SessionEntry.lessThan);
 
+    const widths = if (short) util.ColumnWidths{} else util.columnWidths(sessions.items);
+    const color = !short and posix.isatty(posix.STDOUT_FILENO);
+    if (!short) {
+        try util.writeSessionHeader(&stdout.interface, widths);
+    }
     for (sessions.items) |session| {
-        try util.writeSessionLine(&stdout.interface, session, short, current_session);
+        try util.writeSessionLine(&stdout.interface, session, short, current_session, widths, color);
         try stdout.interface.flush();
     }
 }

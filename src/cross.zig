@@ -9,18 +9,21 @@ pub const c = switch (builtin.os.tag) {
         @cInclude("termios.h");
         @cInclude("stdlib.h");
         @cInclude("unistd.h");
+        @cInclude("time.h"); // localtime_r, strftime
     }),
     .freebsd => @cImport({
         @cInclude("termios.h"); // ioctl and constants
         @cInclude("libutil.h"); // openpty()
         @cInclude("stdlib.h");
         @cInclude("unistd.h");
+        @cInclude("time.h");
     }),
     else => @cImport({
         @cInclude("sys/ioctl.h"); // ioctl and constants
         @cInclude("pty.h");
         @cInclude("stdlib.h");
         @cInclude("unistd.h");
+        @cInclude("time.h");
     }),
 };
 
