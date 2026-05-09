@@ -18,8 +18,9 @@ pub const Tag = enum(u8) {
     Switch = 11,
     Write = 12,
     TaskComplete = 13,
+    ScrollbackLimit = 14,
     // Non-exhaustive: this enum comes off the wire via bytesToValue and
-    // @enumFromInt, so out-of-range values (14-255) are representable
+    // @enumFromInt, so out-of-range values (15-255) are representable
     // rather than UB. Switches must handle `_` (unknown tag).
     _,
 };
@@ -38,6 +39,14 @@ pub const Header = packed struct {
 pub const Resize = packed struct {
     rows: u16,
     cols: u16,
+};
+
+/// Per-attach cap on scrollback rows replayed on (re-)attach. The client
+/// sends this BEFORE `.Init` so the daemon can honor it on the next
+/// `serializeTerminalState`. Older daemons hit the non-exhaustive `_`
+/// arm and ignore it (graceful degradation: they replay full scrollback).
+pub const ScrollbackLimit = packed struct {
+    rows: u32,
 };
 
 pub fn getTerminalSize(fd: i32) Resize {

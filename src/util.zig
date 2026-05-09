@@ -8,6 +8,10 @@ const testing = std.testing;
 
 pub const TIMESTAMP_BUF_LEN = 32;
 
+/// Upper bound on rows of scrollback replayed to a (re-)attaching client.
+/// Older lines remain on the daemon and are accessible via `zmx history`.
+pub const MAX_REPLAY_SCROLLBACK_ROWS: usize = 200;
+
 pub const SessionEntry = struct {
     name: []const u8,
     pid: ?i32,
@@ -490,7 +494,11 @@ pub fn isUserInput(payload: []const u8) bool {
     return false;
 }
 
-pub fn serializeTerminalState(alloc: std.mem.Allocator, term: *ghostty_vt.Terminal) ?[]const u8 {
+pub fn serializeTerminalState(
+    alloc: std.mem.Allocator,
+    term: *ghostty_vt.Terminal,
+    max_scrollback_rows: usize,
+) ?[]const u8 {
     var builder: std.Io.Writer.Allocating = .init(alloc);
     defer builder.deinit();
 
@@ -521,16 +529,22 @@ pub fn serializeTerminalState(alloc: std.mem.Allocator, term: *ghostty_vt.Termin
     //
     // See: https://github.com/neurosnap/zmx/issues/31
 
-    // Phase 1: scrollback only (if any exists)
-    if (has_scrollback) {
+    // Phase 1: scrollback only (if any exists and the cap allows it)
+    if (has_scrollback and max_scrollback_rows > 0) {
         if (active_top.up(1)) |sb_bottom_row| {
             var sb_bottom = sb_bottom_row;
             sb_bottom.x = @intCast(pages.cols - 1);
 
+            // Cap replayed scrollback so re-attach stays snappy on long-lived
+            // sessions. The visible viewport is restored fully in Phase 2;
+            // older history is still on the daemon and reachable via
+            // `zmx history`.
+            const sb_top = active_top.up(max_scrollback_rows) orelse screen_top;
+
             var scroll_fmt = ghostty_vt.formatter.TerminalFormatter.init(term, .vt);
             scroll_fmt.content = .{
                 .selection = ghostty_vt.Selection.init(
-                    screen_top,
+                    sb_top,
                     sb_bottom,
                     false,
                 ),
@@ -1167,7 +1181,7 @@ test "serializeTerminalState excludes synchronized output replay" {
     try testing.expect(term.modes.get(.bracketed_paste));
     try testing.expect(term.modes.get(.synchronized_output));
 
-    const output = serializeTerminalState(alloc, &term) orelse return error.TestUnexpectedNull;
+    const output = serializeTerminalState(alloc, &term, std.math.maxInt(usize)) orelse return error.TestUnexpectedNull;
     defer alloc.free(output);
 
     // The serialized output should contain bracketed paste (DECSET 2004)
@@ -1205,7 +1219,7 @@ fn expectCursorAt(term: *ghostty_vt.Terminal, row: usize, col: usize) !void {
 }
 
 fn serializeRoundtrip(alloc: std.mem.Allocator, source: *ghostty_vt.Terminal) !ghostty_vt.Terminal {
-    const serialized = serializeTerminalState(alloc, source) orelse
+    const serialized = serializeTerminalState(alloc, source, std.math.maxInt(usize)) orelse
         return error.SerializationFailed;
     defer alloc.free(serialized);
 
@@ -1342,7 +1356,7 @@ test "serializeTerminalState nested roundtrip preserves content" {
     const inner_cursor_y = inner.screens.active.cursor.y;
 
     // Serialize inner (simulates inner daemon re-attach to inner client)
-    const inner_serialized = serializeTerminalState(alloc, &inner) orelse
+    const inner_serialized = serializeTerminalState(alloc, &inner, std.math.maxInt(usize)) orelse
         return error.SerializationFailed;
     defer alloc.free(inner_serialized);
 
@@ -1435,7 +1449,7 @@ test "serializeTerminalState scrollback + size mismatch nested roundtrip" {
     const inner_cursor_y = inner.screens.active.cursor.y;
 
     // Inner serialize → outer processes → outer serialize → client
-    const inner_ser = serializeTerminalState(alloc, &inner) orelse
+    const inner_ser = serializeTerminalState(alloc, &inner, std.math.maxInt(usize)) orelse
         return error.SerializationFailed;
     defer alloc.free(inner_ser);
 

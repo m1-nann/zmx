@@ -129,7 +129,13 @@ pub fn main() !void {
 
         var command_args: std.ArrayList([]const u8) = .empty;
         defer command_args.deinit(alloc);
+        var scrollback_limit: ?u32 = null;
         while (args.next()) |arg| {
+            if (std.mem.eql(u8, arg, "--limit")) {
+                const n = args.next() orelse return error.MissingLimitValue;
+                scrollback_limit = std.fmt.parseInt(u32, n, 10) catch return error.InvalidLimit;
+                continue;
+            }
             try command_args.append(alloc, arg);
         }
 
@@ -162,7 +168,7 @@ pub fn main() !void {
             error.OutOfMemory => return err,
         };
         std.log.info("socket path={s}", .{daemon.socket_path});
-        return attach(&daemon);
+        return attach(&daemon, scrollback_limit);
     } else if (std.mem.eql(u8, cmd, "run") or std.mem.eql(u8, cmd, "r")) {
         const session_name = args.next() orelse "";
 
@@ -409,6 +415,14 @@ pub fn main() !void {
     } else {
         // Unknown command: treat as a session name and attach if it exists.
         // Never auto-create a session via this shorthand path.
+        var scrollback_limit: ?u32 = null;
+        while (args.next()) |arg| {
+            if (std.mem.eql(u8, arg, "--limit")) {
+                const n = args.next() orelse return error.MissingLimitValue;
+                scrollback_limit = std.fmt.parseInt(u32, n, 10) catch return error.InvalidLimit;
+            }
+        }
+
         var sessions = try util.get_session_entries(alloc, cfg.socket_dir);
         defer {
             for (sessions.items) |session| {
@@ -455,7 +469,7 @@ pub fn main() !void {
             error.OutOfMemory => return err,
         };
         std.log.info("attach by name shorthand: socket path={s}", .{daemon.socket_path});
-        return attach(&daemon);
+        return attach(&daemon, scrollback_limit);
     }
 }
 
@@ -468,6 +482,9 @@ const Client = struct {
     has_pending_output: bool = false,
     read_buf: ipc.SocketBuffer,
     write_buf: std.ArrayList(u8),
+    /// Per-client cap on scrollback rows replayed at .Init time. Null means
+    /// the daemon's default (`util.MAX_REPLAY_SCROLLBACK_ROWS`).
+    scrollback_limit: ?u32 = null,
 
     pub fn deinit(self: *Client) void {
         posix.close(self.socket_fd);
@@ -963,7 +980,8 @@ const Daemon = struct {
                 "cursor before serialize: x={d} y={d} pending_wrap={}",
                 .{ cursor.x, cursor.y, cursor.pending_wrap },
             );
-            if (util.serializeTerminalState(self.alloc, term)) |term_output| {
+            const limit = if (client.scrollback_limit) |l| @as(usize, l) else util.MAX_REPLAY_SCROLLBACK_ROWS;
+            if (util.serializeTerminalState(self.alloc, term, limit)) |term_output| {
                 std.log.debug("serialize terminal state", .{});
                 // Rewrite OSC 133;A to include redraw=0 so the outer terminal
                 // does not clear prompt lines on resize (issue #111).
@@ -1276,7 +1294,7 @@ fn help() !void {
         \\Usage: zmx <command> [args...]
         \\
         \\Commands:
-        \\  [a]ttach <name> [command...]             Attach to session, creating if needed
+        \\  [a]ttach <name> [--limit N] [command...] Attach to session, creating if needed
         \\  [r]un <name> [-d] [command...]           Send command without attaching
         \\  [s]end <name> <text...>                  Send raw input to session PTY
         \\  [p]rint <name> <text...>                 Inject text into session display
@@ -1295,9 +1313,14 @@ fn help() !void {
         \\  This will spawn a login $SHELL with a PTY.  You can provide a
         \\  command instead of creating a shell.
         \\
+        \\  --limit N caps how many scrollback rows the daemon replays on
+        \\  re-attach (default 200; 0 skips replay; older lines stay in
+        \\  the daemon and are reachable via `zmx history`).
+        \\
         \\  Examples:
         \\    zmx attach dev
         \\    zmx attach dev vim
+        \\    zmx attach dev --limit 200
         \\
         \\History:
         \\  This should generally be used with `tail` to print the last lines
@@ -1865,7 +1888,7 @@ fn switchSesh(daemon: *Daemon, current_sesh: []const u8) !void {
     };
 }
 
-fn attach(daemon: *Daemon) !void {
+fn attach(daemon: *Daemon, scrollback_limit: ?u32) !void {
     const sesh = socket.getSeshNameFromEnv();
     if (sesh.len > 0) {
         return switchSesh(daemon, sesh);
@@ -1922,7 +1945,7 @@ fn attach(daemon: *Daemon) !void {
     const clear_seq = "\x1b[2J\x1b[H";
     _ = try posix.write(posix.STDOUT_FILENO, clear_seq);
 
-    const looper = try clientLoop(client_sock);
+    const looper = try clientLoop(client_sock, scrollback_limit);
     switch (looper.kind) {
         .detach => return,
         .switch_session => {
@@ -1954,7 +1977,7 @@ fn attach(daemon: *Daemon) !void {
                     .created_at = @intCast(std.time.timestamp()),
                     .leader_client_fd = null,
                 };
-                return attach(&target_daemon);
+                return attach(&target_daemon, scrollback_limit);
             }
         },
     }
@@ -2214,7 +2237,7 @@ const ClientResult = struct {
 
 /// clientLoop sends ipc commands to its corresponding daemon.  It uses poll() as its non-blocking
 /// mechanism. It will send stdin to the daemon and receive stdout from the daemon.
-fn clientLoop(client_sock_fd: i32) !ClientResult {
+fn clientLoop(client_sock_fd: i32, scrollback_limit: ?u32) !ClientResult {
     // use c_allocator to avoid "reached unreachable code" panic in DebugAllocator when forking
     const alloc = std.heap.c_allocator;
     defer posix.close(client_sock_fd);
@@ -2230,6 +2253,14 @@ fn clientLoop(client_sock_fd: i32) !ClientResult {
     // Buffer for outgoing socket writes
     var sock_write_buf = try std.ArrayList(u8).initCapacity(alloc, 4096);
     defer sock_write_buf.deinit(alloc);
+
+    // Send the per-attach scrollback cap BEFORE .Init so the daemon honors
+    // it on the very first serializeTerminalState. Older daemons ignore the
+    // unknown tag via the non-exhaustive `_` arm.
+    if (scrollback_limit) |rows| {
+        const sl = ipc.ScrollbackLimit{ .rows = rows };
+        try ipc.appendMessage(alloc, &sock_write_buf, .ScrollbackLimit, std.mem.asBytes(&sl));
+    }
 
     // Send init message with terminal size (buffered)
     const size = ipc.getTerminalSize(posix.STDOUT_FILENO);
@@ -2615,6 +2646,12 @@ fn daemonLoop(daemon: *Daemon, server_sock_fd: i32, pty_fd: i32) !void {
                         .Run => try daemon.handleRun(client, msg.payload),
                         .Ack, .TaskComplete => {},
                         .Write => try daemon.handleWrite(client, msg.payload),
+                        .ScrollbackLimit => {
+                            if (msg.payload.len == @sizeOf(ipc.ScrollbackLimit)) {
+                                const sl = std.mem.bytesToValue(ipc.ScrollbackLimit, msg.payload);
+                                client.scrollback_limit = sl.rows;
+                            }
+                        },
                         _ => std.log.warn(
                             "ignoring unknown IPC tag={d}",
                             .{@intFromEnum(msg.header.tag)},
