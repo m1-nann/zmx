@@ -407,7 +407,55 @@ pub fn main() !void {
         std.log.info("socket path={s}", .{daemon.socket_path});
         try writeFile(&daemon, file_path);
     } else {
-        return help();
+        // Unknown command: treat as a session name and attach if it exists.
+        // Never auto-create a session via this shorthand path.
+        var sessions = try util.get_session_entries(alloc, cfg.socket_dir);
+        defer {
+            for (sessions.items) |session| {
+                session.deinit(alloc);
+            }
+            sessions.deinit(alloc);
+        }
+        var found = false;
+        for (sessions.items) |session| {
+            if (session.is_error) continue;
+            if (std.mem.eql(u8, session.name, cmd)) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            var stderr_buf: [256]u8 = undefined;
+            var stderr_writer = std.fs.File.stderr().writer(&stderr_buf);
+            try stderr_writer.interface.print("no session found: {s}\n", .{cmd});
+            try stderr_writer.interface.flush();
+            std.process.exit(1);
+        }
+
+        const clients = try std.ArrayList(*Client).initCapacity(alloc, 10);
+        var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const cwd = std.posix.getcwd(&cwd_buf) catch "";
+        const sesh = try socket.getSeshName(alloc, cmd);
+        defer alloc.free(sesh);
+        var daemon = Daemon{
+            .running = true,
+            .cfg = &cfg,
+            .alloc = alloc,
+            .clients = clients,
+            .session_name = sesh,
+            .socket_path = undefined,
+            .pid = undefined,
+            .command = null,
+            .cwd = cwd,
+            .created_at = @intCast(std.time.timestamp()),
+            .leader_client_fd = null,
+        };
+        daemon.socket_path = socket.getSocketPath(alloc, cfg.socket_dir, sesh) catch |err| switch (err) {
+            error.NameTooLong => return socket.printSessionNameTooLong(sesh, cfg.socket_dir),
+            error.OutOfMemory => return err,
+        };
+        std.log.info("attach by name shorthand: socket path={s}", .{daemon.socket_path});
+        return attach(&daemon);
     }
 }
 
