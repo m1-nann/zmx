@@ -1233,7 +1233,7 @@ fn help() !void {
         \\  [s]end <name> <text...>                  Send raw input to session PTY
         \\  [p]rint <name> <text...>                 Inject text into session display
         \\  [wr]ite <name> <file_path>               Write stdin to file_path through the session
-        \\  [d]etach                                 Detach all clients (ctrl+\\ for current client)
+        \\  [d]etach                                 Detach all clients (ctrl+\\ or ctrl+q for current client)
         \\  [l]ist|ls [--short]                      List active sessions
         \\  [k]ill <name>... [--force]               Kill session and all attached clients
         \\  [hi]story <name> [--vt|--html]           Output session scrollback
@@ -2249,8 +2249,8 @@ fn clientLoop(client_sock_fd: i32) !ClientResult {
 
             if (n_opt) |n| {
                 if (n > 0) {
-                    // Check for detach sequences (ctrl+\ as first byte or Kitty escape sequence)
-                    if (util.isCtrlBackslash(buf[0..n])) {
+                    // Check for detach sequences (ctrl+\ or ctrl+q as first byte, or Kitty escape sequence)
+                    if (util.isDetachKey(buf[0..n])) {
                         try ipc.appendMessage(alloc, &sock_write_buf, .Detach, "");
                     } else {
                         try ipc.appendMessage(alloc, &sock_write_buf, .Input, buf[0..n]);

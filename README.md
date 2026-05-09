@@ -69,7 +69,7 @@ zig build -Doptimize=ReleaseSafe --prefix ~/.local
 ## usage
 
 > [!IMPORTANT]
-> We recommend closing the terminal window to detach from the session but you can also press `ctrl+\` or run `zmx detach`.
+> We recommend closing the terminal window to detach from the session but you can also press `ctrl+\` (or `ctrl+q`) or run `zmx detach`.
 
 ```
 zmx - session persistence for terminal processes
@@ -82,7 +82,7 @@ Commands:
   [s]end <name> <text...>                  Send raw input to session PTY
   [p]rint <name> <text...>                 Inject text into session display
   [wr]ite <name> <file_path>               Write stdin to file_path through the session
-  [d]etach                                 Detach all clients (ctrl+\\ for current client)
+  [d]etach                                 Detach all clients (ctrl+\\ or ctrl+q for current client)
   [l]ist|ls [--short]                      List active sessions
   [k]ill <name>... [--force]               Kill session and all attached clients
   [hi]story <name> [--vt|--html]           Output session scrollback

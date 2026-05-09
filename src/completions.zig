@@ -128,7 +128,7 @@ const fish_completions =
     \\complete -c zmx -n "__fish_is_nth_token 1" -a run -d 'Send command without attaching'
     \\complete -c zmx -n "__fish_is_nth_token 1" -a send -d 'Send raw input to session PTY'
     \\complete -c zmx -n "__fish_is_nth_token 1" -a write -d 'Write stdin to file_path through the session'
-    \\complete -c zmx -n "__fish_is_nth_token 1" -a detach -d 'Detach all clients (ctrl+\ for current client)'
+    \\complete -c zmx -n "__fish_is_nth_token 1" -a detach -d 'Detach all clients (ctrl+\ or ctrl+q for current client)'
     \\complete -c zmx -n "__fish_is_nth_token 1" -a list -d 'List active sessions'
     \\complete -c zmx -n "__fish_is_nth_token 1" -a kill -d 'Kill session and all attached clients'
     \\complete -c zmx -n "__fish_is_nth_token 1" -a history -d 'Output session scrollback'

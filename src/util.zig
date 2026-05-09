@@ -356,6 +356,17 @@ pub fn isCtrlBackslash(buf: []const u8) bool {
     return buf[0] == 0x1C or isKeyPressed(buf, 0x5c, 0b100);
 }
 
+/// Detects raw byte or Kitty keyboard protocol escape sequence for Ctrl+q.
+pub fn isCtrlQ(buf: []const u8) bool {
+    if (buf.len == 0) return false;
+    return buf[0] == 0x11 or isKeyPressed(buf, 'q', 0b100);
+}
+
+/// Returns true if `buf` represents any of the configured detach key bindings.
+pub fn isDetachKey(buf: []const u8) bool {
+    return isCtrlBackslash(buf) or isCtrlQ(buf);
+}
+
 /// Detects vt100 or kitty keyboard protocol escape sequence for up arrow.
 pub fn isUpArrow(buf: []const u8) bool {
     return std.mem.eql(u8, buf, "\x1b[A") or std.mem.eql(u8, buf, "\x1b[1;1:1A");
@@ -966,6 +977,58 @@ test "isCtrlBackslash" {
 
     // Other CSI u sequences that happen to contain '92' elsewhere
     try expect(!isCtrlBackslash("\x1b[65;92u"));
+}
+
+test "isCtrlQ" {
+    const expect = testing.expect;
+
+    // Raw control byte (Ctrl+q = 0x11)
+    try expect(isCtrlQ(&[_]u8{0x11}));
+
+    // Basic Kitty CSI u: key 'q' (113), ctrl modifier (5 = 1 + 4)
+    try expect(isCtrlQ("\x1b[113;5u"));
+
+    // Press / repeat event types
+    try expect(isCtrlQ("\x1b[113;5:1u"));
+    try expect(isCtrlQ("\x1b[113;5:2u"));
+
+    // Release event must NOT trigger detach
+    try expect(!isCtrlQ("\x1b[113;5:3u"));
+
+    // Lock modifiers tolerated (caps_lock, num_lock)
+    try expect(isCtrlQ("\x1b[113;69u"));
+    try expect(isCtrlQ("\x1b[113;133u"));
+    try expect(isCtrlQ("\x1b[113;197u"));
+
+    // Intentional extra modifiers must NOT match
+    try expect(!isCtrlQ("\x1b[113;6u")); // ctrl+shift
+    try expect(!isCtrlQ("\x1b[113;7u")); // ctrl+alt
+
+    // Wrong key code must NOT match
+    try expect(!isCtrlQ("\x1b[112;5u"));
+    try expect(!isCtrlQ("\x1b[114;5u"));
+
+    // Backslash sequence must NOT match isCtrlQ
+    try expect(!isCtrlQ("\x1b[92;5u"));
+    try expect(!isCtrlQ(&[_]u8{0x1C}));
+
+    // Garbage / malformed
+    try expect(!isCtrlQ(""));
+    try expect(!isCtrlQ("garbage"));
+}
+
+test "isDetachKey accepts both bindings" {
+    const expect = testing.expect;
+
+    try expect(isDetachKey(&[_]u8{0x1C}));
+    try expect(isDetachKey(&[_]u8{0x11}));
+    try expect(isDetachKey("\x1b[92;5u"));
+    try expect(isDetachKey("\x1b[113;5u"));
+
+    try expect(!isDetachKey(""));
+    try expect(!isDetachKey("a"));
+    try expect(!isDetachKey("\x1b[92;5:3u"));
+    try expect(!isDetachKey("\x1b[113;5:3u"));
 }
 
 test "serializeTerminalState excludes synchronized output replay" {
