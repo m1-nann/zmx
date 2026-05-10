@@ -667,14 +667,17 @@ pub fn detectShell() [:0]const u8 {
 const NAME_HIGHLIGHT_ON = "\x1b[1;36m";
 const NAME_HIGHLIGHT_OFF = "\x1b[0m";
 
+const HEADER_INDEX = "#";
 const HEADER_NAME = "NAME";
 const HEADER_PID = "PID";
 const HEADER_CLIENTS = "CLIENTS";
 const HEADER_CWD = "CWD";
 
 /// Per-column display widths used to right-pad values so the table aligns
-/// across rows. Default zero values produce an unpadded single-row layout.
+/// across rows. `index = 0` suppresses the index column entirely (used by
+/// unit tests). Default zero values produce an unpadded single-row layout.
 pub const ColumnWidths = struct {
+    index: usize = 0,
     name: usize = 0,
     pid: usize = 0,
     clients: usize = 0,
@@ -685,11 +688,15 @@ pub const ColumnWidths = struct {
 /// also fits cleanly. Error rows are skipped.
 pub fn columnWidths(sessions: []const SessionEntry) ColumnWidths {
     var w: ColumnWidths = .{
+        .index = HEADER_INDEX.len,
         .name = HEADER_NAME.len,
         .pid = HEADER_PID.len,
         .clients = HEADER_CLIENTS.len,
     };
     var buf: [32]u8 = undefined;
+    if (std.fmt.bufPrint(&buf, "{d}", .{sessions.len})) |str| {
+        if (str.len > w.index) w.index = str.len;
+    } else |_| {}
     for (sessions) |s| {
         if (s.is_error) continue;
         if (s.name.len > w.name) w.name = s.name.len;
@@ -710,6 +717,19 @@ pub fn columnWidths(sessions: []const SessionEntry) ColumnWidths {
 fn writeSpaces(writer: *std.Io.Writer, n: usize) !void {
     var i: usize = 0;
     while (i < n) : (i += 1) try writer.writeByte(' ');
+}
+
+/// Writes the 1-based row index column followed by a single space, padded
+/// to `width`. A zero `width` suppresses the column entirely (used by the
+/// unit tests that exercise `writeSessionLine` with a default-zero
+/// `ColumnWidths`).
+fn writeIndex(writer: *std.Io.Writer, width: usize, index: usize) !void {
+    if (width == 0) return;
+    var idx_buf: [32]u8 = undefined;
+    const idx_str = try std.fmt.bufPrint(&idx_buf, "{d}", .{index});
+    try writer.writeAll(idx_str);
+    try writeSpaces(writer, width -| idx_str.len);
+    try writer.writeByte(' ');
 }
 
 /// Writes `path` with a leading `$HOME` replaced by `~` for compactness.
@@ -733,6 +753,11 @@ fn writeShortPath(writer: *std.Io.Writer, path: []const u8) !void {
 /// current-session arrow gutter so headers align with data rows.
 pub fn writeSessionHeader(writer: *std.Io.Writer, widths: ColumnWidths) !void {
     try writer.writeAll("  ");
+    if (widths.index > 0) {
+        try writer.writeAll(HEADER_INDEX);
+        try writeSpaces(writer, widths.index -| HEADER_INDEX.len);
+        try writer.writeByte(' ');
+    }
     try writer.writeAll(HEADER_NAME);
     try writeSpaces(writer, widths.name -| HEADER_NAME.len);
     try writer.writeByte(' ');
@@ -758,6 +783,7 @@ pub fn writeSessionLine(
     current_session: ?[]const u8,
     widths: ColumnWidths,
     color: bool,
+    index: usize,
 ) !void {
     const current_arrow = "→";
     const prefix = if (current_session) |current|
@@ -780,6 +806,7 @@ pub fn writeSessionLine(
         else
             "unreachable";
         try writer.writeAll(prefix);
+        try writeIndex(writer, widths.index, index);
         if (color) try writer.writeAll(NAME_HIGHLIGHT_ON);
         try writer.writeAll(session.name);
         if (color) try writer.writeAll(NAME_HIGHLIGHT_OFF);
@@ -794,6 +821,7 @@ pub fn writeSessionLine(
     var num_buf: [32]u8 = undefined;
 
     try writer.writeAll(prefix);
+    try writeIndex(writer, widths.index, index);
     if (color) try writer.writeAll(NAME_HIGHLIGHT_ON);
     try writer.writeAll(session.name);
     if (color) try writer.writeAll(NAME_HIGHLIGHT_OFF);
@@ -856,7 +884,7 @@ test "writeSessionLine formats output for current session and short output" {
     for (full_cases) |case| {
         var builder: std.Io.Writer.Allocating = .init(testing.allocator);
         defer builder.deinit();
-        try writeSessionLine(&builder.writer, session, false, case.current_session, .{}, false);
+        try writeSessionLine(&builder.writer, session, false, case.current_session, .{}, false, 0);
 
         const expected = try std.fmt.allocPrint(
             testing.allocator,
@@ -871,7 +899,7 @@ test "writeSessionLine formats output for current session and short output" {
     for (short_cases) |current_session| {
         var builder: std.Io.Writer.Allocating = .init(testing.allocator);
         defer builder.deinit();
-        try writeSessionLine(&builder.writer, session, true, current_session, .{}, false);
+        try writeSessionLine(&builder.writer, session, true, current_session, .{}, false, 0);
         try testing.expectEqualStrings("dev\n", builder.writer.buffered());
     }
 }

@@ -57,6 +57,38 @@ fn parseSessionArg(alloc: std.mem.Allocator, raw: []const u8) !SessionMatch {
     return .{ .name = name, .is_prefix = false };
 }
 
+/// Resolves a user-provided session reference to the on-disk session name.
+/// Accepts either:
+///   - a 1-based index into the alphabetically-sorted `zmx list` output
+///     (e.g. `zmx attach 3`), or
+///   - a literal session name (any prefix configured via `$ZMX_SESSION_PREFIX`
+///     is applied transparently).
+///
+/// An integer is interpreted as an index *only* when it falls within the
+/// current range of sessions; out-of-range integers (and any non-integer
+/// query) fall through to literal-name resolution. This preserves the
+/// ability to create or address a session whose name is itself numeric
+/// when no matching index exists.
+///
+/// Caller owns the returned slice.
+fn getSession(alloc: std.mem.Allocator, socket_dir: []const u8, query: []const u8) ![]const u8 {
+    if (std.fmt.parseInt(usize, query, 10)) |idx| {
+        if (idx > 0) {
+            var sessions = try util.get_session_entries(alloc, socket_dir);
+            defer {
+                for (sessions.items) |s| s.deinit(alloc);
+                sessions.deinit(alloc);
+            }
+            std.mem.sort(util.SessionEntry, sessions.items, {}, util.SessionEntry.lessThan);
+            if (idx <= sessions.items.len) {
+                return alloc.dupe(u8, sessions.items[idx - 1].name);
+            }
+        }
+    } else |_| {}
+
+    return socket.getSeshName(alloc, query);
+}
+
 fn openSignalPipe() !void {
     sig_pipe = try posix.pipe2(.{ .CLOEXEC = true, .NONBLOCK = true });
 }
@@ -148,7 +180,7 @@ pub fn main() !void {
         var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
         const cwd = std.posix.getcwd(&cwd_buf) catch "";
 
-        const sesh = try socket.getSeshName(alloc, session_name);
+        const sesh = try getSession(alloc, cfg.socket_dir, session_name);
         defer alloc.free(sesh);
         var daemon = Daemon{
             .running = true,
@@ -421,8 +453,9 @@ pub fn main() !void {
         std.log.info("socket path={s}", .{daemon.socket_path});
         try writeFile(&daemon, file_path);
     } else {
-        // Unknown command: treat as a session name and attach if it exists.
-        // Never auto-create a session via this shorthand path.
+        // Unknown command: treat as a session reference (name or 1-based
+        // index) and attach if it exists. Never auto-create a session via
+        // this shorthand path.
         var scrollback_limit: ?u32 = null;
         while (args.next()) |arg| {
             if (std.mem.eql(u8, arg, "--limit")) {
@@ -431,22 +464,12 @@ pub fn main() !void {
             }
         }
 
-        var sessions = try util.get_session_entries(alloc, cfg.socket_dir);
-        defer {
-            for (sessions.items) |session| {
-                session.deinit(alloc);
-            }
-            sessions.deinit(alloc);
-        }
-        var found = false;
-        for (sessions.items) |session| {
-            if (session.is_error) continue;
-            if (std.mem.eql(u8, session.name, cmd)) {
-                found = true;
-                break;
-            }
-        }
-        if (!found) {
+        const sesh = try getSession(alloc, cfg.socket_dir, cmd);
+        defer alloc.free(sesh);
+
+        var dir = try std.fs.openDirAbsolute(cfg.socket_dir, .{});
+        defer dir.close();
+        if (!(try socket.sessionExists(dir, sesh))) {
             var stderr_buf: [256]u8 = undefined;
             var stderr_writer = std.fs.File.stderr().writer(&stderr_buf);
             try stderr_writer.interface.print("no session found: {s}\n", .{cmd});
@@ -457,8 +480,6 @@ pub fn main() !void {
         const clients = try std.ArrayList(*Client).initCapacity(alloc, 10);
         var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
         const cwd = std.posix.getcwd(&cwd_buf) catch "";
-        const sesh = try socket.getSeshName(alloc, cmd);
-        defer alloc.free(sesh);
         var daemon = Daemon{
             .running = true,
             .cfg = &cfg,
@@ -1355,6 +1376,10 @@ fn help() !void {
         \\  This will spawn a login $SHELL with a PTY.  You can provide a
         \\  command instead of creating a shell.
         \\
+        \\  <name> may be either a session name or a 1-based index from
+        \\  `zmx list` (the same alphabetical order). `zmx 3` and
+        \\  `zmx attach 3` both attach to the third row of `zmx list`.
+        \\
         \\  --limit N caps how many scrollback rows the daemon replays on
         \\  re-attach (default 200; 0 skips replay; older lines stay in
         \\  the daemon and are reachable via `zmx history`).
@@ -1363,6 +1388,7 @@ fn help() !void {
         \\    zmx attach dev
         \\    zmx attach dev vim
         \\    zmx attach dev --limit 200
+        \\    zmx 3
         \\
         \\History:
         \\  This should generally be used with `tail` to print the last lines
@@ -1750,8 +1776,8 @@ fn list(cfg: *Cfg, short: bool) !void {
     if (!short) {
         try util.writeSessionHeader(&stdout.interface, widths);
     }
-    for (sessions.items) |session| {
-        try util.writeSessionLine(&stdout.interface, session, short, current_session, widths, color);
+    for (sessions.items, 1..) |session, index| {
+        try util.writeSessionLine(&stdout.interface, session, short, current_session, widths, color, index);
         try stdout.interface.flush();
     }
 }
