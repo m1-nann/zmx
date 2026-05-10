@@ -296,6 +296,9 @@ pub fn main() !void {
         const sesh = try socket.getSeshName(alloc, session_name);
         defer alloc.free(sesh);
         return restart(&cfg, alloc, sesh);
+    } else if (std.mem.eql(u8, cmd, "rename") or std.mem.eql(u8, cmd, "ren")) {
+        const new_name_raw = args.next() orelse return error.SessionNameRequired;
+        return rename(&cfg, alloc, new_name_raw);
     } else if (std.mem.eql(u8, cmd, "wait") or std.mem.eql(u8, cmd, "w")) {
         var matchers: std.ArrayList(SessionMatch) = .empty;
         defer {
@@ -1340,6 +1343,7 @@ fn help() !void {
         \\  [l]ist|ls [--short]                      List active sessions
         \\  [k]ill <name>... [--force]               Kill session and all attached clients
         \\  [re]start <name>                         Kill <name> and respawn it in the same cwd
+        \\  [ren]ame <new_name>                      Rename the current session (must run inside it)
         \\  [hi]story <name> [--vt|--html]           Output session scrollback
         \\  [w]ait <name>...                         Wait for session tasks to complete
         \\  [t]ail <name>...                         Follow session output
@@ -1910,6 +1914,82 @@ fn restart(cfg: *Cfg, alloc: std.mem.Allocator, session_name: []const u8) !void 
     // Mirror `zmx attach`: spawn the daemon and stay attached as the client
     // until the user detaches.
     return attach(&daemon, null);
+}
+
+/// Renames the session the calling shell is inside (identified via
+/// $ZMX_SESSION) by renaming the unix socket and log files. The daemon
+/// keeps serving on its existing fd, so live clients are unaffected.
+/// $ZMX_SESSION inside the still-running shell does not update — that
+/// would require modifying the running shell's environment, which is
+/// not portable. Restart the shell (or `export ZMX_SESSION=<new>`) to
+/// pick up the new name in your prompt.
+fn rename(cfg: *Cfg, alloc: std.mem.Allocator, new_name_raw: []const u8) !void {
+    const cur_sesh = socket.getSeshNameFromEnv();
+    if (cur_sesh.len == 0) {
+        var buf: [256]u8 = undefined;
+        var w = std.fs.File.stderr().writer(&buf);
+        try w.interface.print(
+            "rename must run inside a zmx session (\\$ZMX_SESSION is empty)\n",
+            .{},
+        );
+        try w.interface.flush();
+        return error.NotInSession;
+    }
+
+    const new_sesh = try socket.getSeshName(alloc, new_name_raw);
+    defer alloc.free(new_sesh);
+
+    if (std.mem.eql(u8, cur_sesh, new_sesh)) {
+        // No-op: caller asked to rename to the same name.
+        return;
+    }
+
+    var dir = try std.fs.openDirAbsolute(cfg.socket_dir, .{});
+    defer dir.close();
+
+    if (try socket.sessionExists(dir, new_sesh)) {
+        var buf: [512]u8 = undefined;
+        var w = std.fs.File.stderr().writer(&buf);
+        try w.interface.print(
+            "cannot rename: session \"{s}\" already exists\n",
+            .{new_sesh},
+        );
+        try w.interface.flush();
+        return error.SessionAlreadyExists;
+    }
+
+    // Rename the unix socket file. The daemon's bound fd is unaffected;
+    // it keeps serving. New connections find it via the new path.
+    dir.rename(cur_sesh, new_sesh) catch |err| {
+        var buf: [512]u8 = undefined;
+        var w = std.fs.File.stderr().writer(&buf);
+        try w.interface.print(
+            "failed to rename socket {s} -> {s}: {s}\n",
+            .{ cur_sesh, new_sesh, @errorName(err) },
+        );
+        try w.interface.flush();
+        return err;
+    };
+
+    // Rename the log file (best effort — a missing log file isn't fatal).
+    var log_dir = std.fs.openDirAbsolute(cfg.log_dir, .{}) catch null;
+    if (log_dir) |*ld| {
+        defer ld.close();
+        const old_log = try std.fmt.allocPrint(alloc, "{s}.log", .{cur_sesh});
+        defer alloc.free(old_log);
+        const new_log = try std.fmt.allocPrint(alloc, "{s}.log", .{new_sesh});
+        defer alloc.free(new_log);
+        ld.rename(old_log, new_log) catch {};
+    }
+
+    var out_buf: [512]u8 = undefined;
+    var w = std.fs.File.stdout().writer(&out_buf);
+    try w.interface.print("renamed session {s} -> {s}\n", .{ cur_sesh, new_sesh });
+    try w.interface.print(
+        "(\\$ZMX_SESSION in this shell still shows the old name; run `export ZMX_SESSION={s}` or open a new shell to refresh your prompt)\n",
+        .{new_sesh},
+    );
+    try w.interface.flush();
 }
 
 fn history(cfg: *Cfg, session_name: []const u8, format: util.HistoryFormat) !void {
