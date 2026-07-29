@@ -9,6 +9,12 @@ Use spec: https://common-changelog.org/
 - `zmx send` send raw bytes to session without ZMX completion marker or auto-newline
 - `zmx print` send raw bytes to client's stdout
 - `zmx ls` is accepted as an alias for `zmx list`
+- `zmx <name> --add` creates the session if it does not exist, then attaches (accepts a trailing command and `--limit N`)
+
+### Changed
+
+- *BREAKING* Removed the `zmx attach` (`zmx a`) command. Attach with the bare session name (`zmx <name>`); pass `--add` to create the session on demand (the old create-if-needed behavior)
+- `zmx version` now reports the semver plus the git commit hash (e.g. `0.5.0-fd2ddcc`) in every build mode, so a binary is uniquely identifiable
 
 ### Fixed
 

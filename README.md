@@ -77,7 +77,7 @@ zmx - session persistence for terminal processes
 Usage: zmx <command> [args...]
 
 Commands:
-  [a]ttach <name> [command...]             Attach to session, creating if needed
+  <name> [--add] [--limit N] [command...]  Attach to session (--add creates it if missing)
   [r]un <name> [-d] [--fish] [command...]  Send command without attaching
   [s]end <name> <text...>                  Send raw input to session PTY
   [p]rint <name> <text...>                 Inject text into session display
@@ -93,12 +93,15 @@ Commands:
   [h]elp                                   Show this help
 
 Attach:
-  This will spawn a login $SHELL with a PTY.  You can provide a
-  command instead of creating a shell.
+  `zmx <name>` attaches to an existing session. The session must
+  already exist; pass --add to create it on demand. Creating a
+  session spawns a login $SHELL with a PTY -- provide a trailing
+  command to run that instead of a shell.
 
   Examples:
-    zmx attach dev
-    zmx attach dev vim
+    zmx dev              # attach to existing session "dev"
+    zmx dev --add        # create "dev" if missing, then attach
+    zmx dev --add vim    # create "dev" running vim
 
 History:
   This should generally be used with `tail` to print the last lines
@@ -268,7 +271,7 @@ style = "bold magenta"
 Shell auto-completion for `zmx` commands and session names can be enabled using the `completions` subcommand. Once configured, you'll get auto-complete for both local `zmx` commands and sessions:
 
 ```bash
-ssh remote-server zmx attach session-na<TAB>
+ssh remote-server zmx session-na<TAB>
 # <- auto-complete suggestions appear here
 ```
 
@@ -354,7 +357,7 @@ zmx-select() {
     return 130
   fi
 
-  zmx attach "$session_name"
+  zmx "$session_name" --add
 }
 ```
 
@@ -374,9 +377,9 @@ We allow users to set an environment variable `ZMX_SESSION_PREFIX` which will pr
 
 ```bash
 export ZMX_SESSION_PREFIX="d."
-zmx a runner # ZMX_SESSION=d.runner
-zmx a tests  # ZMX_SESSION=d.tests
-zmx k tests  # kills d.tests
+zmx runner --add # ZMX_SESSION=d.runner
+zmx tests --add  # ZMX_SESSION=d.tests
+zmx k tests      # kills d.tests
 zmx wait     # suspends until all tasks prefixed with "d." are complete
 ```
 
@@ -396,7 +399,7 @@ First, create an `ssh` config entry for your remote dev server:
 Host = d.*
     HostName 192.168.1.xxx
 
-    RemoteCommand zmx attach %k
+    RemoteCommand zmx %k --add
     RequestTTY yes
     ControlPath ~/.ssh/cm-%r@%h:%p
     ControlMaster auto
@@ -414,7 +417,7 @@ ssh d.pico
 ssh d.dotfiles
 ```
 
-Because the `attach` command is essentially an "upsert", this will create or attach to each session.
+Because `zmx <name> --add` is essentially an "upsert", this will create or attach to each session.
 
 Now you can use the [`autossh`](https://linux.die.net/man/1/autossh) tool to make your ssh connections auto-reconnect. For example, if you have a laptop and close/open your lid it will automatically reconnect all your ssh connections:
 
@@ -494,7 +497,7 @@ We use `libghostty-vt` to restore the previous state of the terminal when a clie
 
 How it works:
 
-- user creates session `zmx attach term`
+- user creates session `zmx term --add`
 - user interacts with terminal stdin
 - stdin gets sent to pty via daemon
 - daemon sends pty output to client *and* `ghostty-vt`

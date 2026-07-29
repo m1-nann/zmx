@@ -60,7 +60,7 @@ fn parseSessionArg(alloc: std.mem.Allocator, raw: []const u8) !SessionMatch {
 /// Resolves a user-provided session reference to the on-disk session name.
 /// Accepts either:
 ///   - a 1-based index into the alphabetically-sorted `zmx list` output
-///     (e.g. `zmx attach 3`), or
+///     (e.g. `zmx 3`), or
 ///   - a literal session name (any prefix configured via `$ZMX_SESSION_PREFIX`
 ///     is applied transparently).
 ///
@@ -156,51 +156,6 @@ pub fn main() !void {
         const sesh = try socket.getSeshName(alloc, session_name orelse sesh_env);
         defer alloc.free(sesh);
         return history(&cfg, sesh, format);
-    } else if (std.mem.eql(u8, cmd, "attach") or std.mem.eql(u8, cmd, "a")) {
-        const session_name = args.next() orelse "";
-
-        var command_args: std.ArrayList([]const u8) = .empty;
-        defer command_args.deinit(alloc);
-        var scrollback_limit: ?u32 = null;
-        while (args.next()) |arg| {
-            if (std.mem.eql(u8, arg, "--limit")) {
-                const n = args.next() orelse return error.MissingLimitValue;
-                scrollback_limit = std.fmt.parseInt(u32, n, 10) catch return error.InvalidLimit;
-                continue;
-            }
-            try command_args.append(alloc, arg);
-        }
-
-        const clients = try std.ArrayList(*Client).initCapacity(alloc, 10);
-        var command: ?[][]const u8 = null;
-        if (command_args.items.len > 0) {
-            command = command_args.items;
-        }
-
-        var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const cwd = std.posix.getcwd(&cwd_buf) catch "";
-
-        const sesh = try getSession(alloc, cfg.socket_dir, session_name);
-        defer alloc.free(sesh);
-        var daemon = Daemon{
-            .running = true,
-            .cfg = &cfg,
-            .alloc = alloc,
-            .clients = clients,
-            .session_name = sesh,
-            .socket_path = undefined,
-            .pid = undefined,
-            .command = command,
-            .cwd = cwd,
-            .created_at = @intCast(std.time.timestamp()),
-            .leader_client_fd = null,
-        };
-        daemon.socket_path = socket.getSocketPath(alloc, cfg.socket_dir, sesh) catch |err| switch (err) {
-            error.NameTooLong => return socket.printSessionNameTooLong(sesh, cfg.socket_dir),
-            error.OutOfMemory => return err,
-        };
-        std.log.info("socket path={s}", .{daemon.socket_path});
-        return attach(&daemon, scrollback_limit);
     } else if (std.mem.eql(u8, cmd, "run") or std.mem.eql(u8, cmd, "r")) {
         const session_name = args.next() orelse "";
 
@@ -453,31 +408,53 @@ pub fn main() !void {
         std.log.info("socket path={s}", .{daemon.socket_path});
         try writeFile(&daemon, file_path);
     } else {
-        // Unknown command: treat as a session reference (name or 1-based
-        // index) and attach if it exists. Never auto-create a session via
-        // this shorthand path.
+        // Bare session reference: `zmx <name|index> [--add] [--limit N] [command...]`
+        //
+        // Attaches to an existing session (name or 1-based `zmx list` index).
+        // With --add, creates the session if it does not exist, spawning a
+        // login $SHELL or the trailing command. Without --add, a missing
+        // session is an error -- this shorthand never auto-creates.
+        var command_args: std.ArrayList([]const u8) = .empty;
+        defer command_args.deinit(alloc);
         var scrollback_limit: ?u32 = null;
+        var add = false;
         while (args.next()) |arg| {
+            if (std.mem.eql(u8, arg, "--add")) {
+                add = true;
+                continue;
+            }
             if (std.mem.eql(u8, arg, "--limit")) {
                 const n = args.next() orelse return error.MissingLimitValue;
                 scrollback_limit = std.fmt.parseInt(u32, n, 10) catch return error.InvalidLimit;
+                continue;
             }
+            try command_args.append(alloc, arg);
         }
 
         const sesh = try getSession(alloc, cfg.socket_dir, cmd);
         defer alloc.free(sesh);
 
-        var dir = try std.fs.openDirAbsolute(cfg.socket_dir, .{});
-        defer dir.close();
-        if (!(try socket.sessionExists(dir, sesh))) {
-            var stderr_buf: [256]u8 = undefined;
-            var stderr_writer = std.fs.File.stderr().writer(&stderr_buf);
-            try stderr_writer.interface.print("no session found: {s}\n", .{cmd});
-            try stderr_writer.interface.flush();
-            std.process.exit(1);
+        // Without --add the session must already exist; refuse to create it.
+        if (!add) {
+            var dir = try std.fs.openDirAbsolute(cfg.socket_dir, .{});
+            defer dir.close();
+            if (!(try socket.sessionExists(dir, sesh))) {
+                var stderr_buf: [256]u8 = undefined;
+                var stderr_writer = std.fs.File.stderr().writer(&stderr_buf);
+                try stderr_writer.interface.print(
+                    "no session found: {s} (use --add to create it)\n",
+                    .{cmd},
+                );
+                try stderr_writer.interface.flush();
+                std.process.exit(1);
+            }
         }
 
         const clients = try std.ArrayList(*Client).initCapacity(alloc, 10);
+        var command: ?[][]const u8 = null;
+        if (command_args.items.len > 0) {
+            command = command_args.items;
+        }
         var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
         const cwd = std.posix.getcwd(&cwd_buf) catch "";
         var daemon = Daemon{
@@ -488,7 +465,7 @@ pub fn main() !void {
             .session_name = sesh,
             .socket_path = undefined,
             .pid = undefined,
-            .command = null,
+            .command = command,
             .cwd = cwd,
             .created_at = @intCast(std.time.timestamp()),
             .leader_client_fd = null,
@@ -1329,13 +1306,12 @@ const Daemon = struct {
 fn printVersion(cfg: *Cfg) !void {
     var buf: [256]u8 = undefined;
     var w = std.fs.File.stdout().writer(&buf);
-    var ver = version;
-    if (builtin.mode == .Debug) {
-        ver = git_sha;
-    }
+    // The built version always carries the commit hash (e.g. "0.5.0-fd2ddcc")
+    // so `zmx version` uniquely identifies the binary. scripts/deploy.dart
+    // relies on this to verify that a deploy landed the intended build.
     try w.interface.print(
-        "zmx\t\t{s}\nghostty_vt\t{s}\nsocket_dir\t{s}\nlog_dir\t\t{s}\n",
-        .{ ver, ghostty_version, cfg.socket_dir, cfg.log_dir },
+        "zmx\t\t{s}-{s}\nghostty_vt\t{s}\nsocket_dir\t{s}\nlog_dir\t\t{s}\n",
+        .{ version, git_sha, ghostty_version, cfg.socket_dir, cfg.log_dir },
     );
     try w.interface.flush();
 }
@@ -1355,7 +1331,7 @@ fn help() !void {
         \\Usage: zmx <command> [args...]
         \\
         \\Commands:
-        \\  [a]ttach <name> [--limit N] [command...] Attach to session, creating if needed
+        \\  <name> [--add] [--limit N] [command...]  Attach to session (--add creates it if missing)
         \\  [r]un <name> [-d] [command...]           Send command without attaching
         \\  [s]end <name> <text...>                  Send raw input to session PTY
         \\  [p]rint <name> <text...>                 Inject text into session display
@@ -1373,21 +1349,24 @@ fn help() !void {
         \\  [h]elp                                   Show this help
         \\
         \\Attach:
-        \\  This will spawn a login $SHELL with a PTY.  You can provide a
-        \\  command instead of creating a shell.
+        \\  `zmx <name>` attaches to an existing session. The session must
+        \\  already exist; pass --add to create it on demand. Creating a
+        \\  session spawns a login $SHELL with a PTY -- provide a trailing
+        \\  command to run that instead of a shell.
         \\
         \\  <name> may be either a session name or a 1-based index from
-        \\  `zmx list` (the same alphabetical order). `zmx 3` and
-        \\  `zmx attach 3` both attach to the third row of `zmx list`.
+        \\  `zmx list` (the same alphabetical order). `zmx 3` attaches to
+        \\  the third row of `zmx list`.
         \\
         \\  --limit N caps how many scrollback rows the daemon replays on
         \\  re-attach (default 200; 0 skips replay; older lines stay in
         \\  the daemon and are reachable via `zmx history`).
         \\
         \\  Examples:
-        \\    zmx attach dev
-        \\    zmx attach dev vim
-        \\    zmx attach dev --limit 200
+        \\    zmx dev              # attach to existing session "dev"
+        \\    zmx dev --add        # create "dev" if missing, then attach
+        \\    zmx dev --add vim    # create "dev" running vim
+        \\    zmx dev --limit 200
         \\    zmx 3
         \\
         \\History:
@@ -1735,7 +1714,7 @@ fn wait(cfg: *Cfg, matchers: std.ArrayList(SessionMatch)) !void {
                 session.name,
                 session.task_exit_code.?,
             });
-            try stdout.print("See the logs:\nzmx history {s}\nzmx attach {s}\n", .{ session.name, session.name });
+            try stdout.print("See the logs:\nzmx history {s}\nzmx {s}\n", .{ session.name, session.name });
             try stdout.flush();
         }
     }

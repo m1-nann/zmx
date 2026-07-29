@@ -1,0 +1,9 @@
+name: zmx_scripts
+description: Deployment and utility scripts for the zmx CLI.
+publish_to: none
+
+# deploy.dart only uses dart:io, so it runs standalone with `dart scripts/deploy.dart`.
+# This pubspec exists so the scripts/ folder is a proper Dart package for the
+# analyzer and any future package-using scripts.
+environment:
+  sdk: ^3.0.0
